@@ -84,8 +84,10 @@ Outputs:
   on `ubuntu-latest` + `macos-latest`, Node 20.
 - Desktop (`.github/workflows/desktop.yml`): builds Windows+Linux on `ubuntu-latest`,
   macOS on `macos-latest`. Manual dispatch with platform filter, auto-build on
-  `v*` tags, artifacts uploaded per platform, tag pushes create a GitHub Release
-  with zips (+ `.dmg` for macOS, built via staging dir + `hdiutil`) and
+  `master` pushes and `v*` tags, artifacts uploaded per platform. Releases are
+  automatic after the build: `master`/manual runs update the rolling
+  `desktop-latest` prerelease, `v*` tags create a versioned GitHub Release —
+  both with zips (+ `.dmg` for macOS, built via staging dir + `hdiutil`) and
   `SHA256SUMS.txt` via `softprops/action-gh-release`. The DMG is unsigned —
   users on recent macOS must right-click > Open on first launch unless you add
   codesigning/notarization (requires Apple Developer secrets).
