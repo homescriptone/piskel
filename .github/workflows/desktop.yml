@@ -81,6 +81,13 @@ jobs:
           restore-keys: |
             nwjs-0.110.1-${{ matrix.platform }}-
 
+      - name: Show runner OS (proves macOS vs Linux job)
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          echo "matrix.os=${{ matrix.os }} platform=${{ matrix.platform }}"
+          uname -a
+          sw_vers || true
+
       - name: Build web assets
         if: steps.gate.outputs.run == 'true'
         run: npm run build
@@ -105,7 +112,7 @@ jobs:
             fi
           done
           cd ../..
-          ls -la dest/desktop/*.zip
+          ls -la dest/desktop/
 
       - name: Package artifact (macOS)
         if: steps.gate.outputs.run == 'true' && matrix.platform == 'macos'
@@ -121,23 +128,28 @@ jobs:
           fi
           echo "Found app: $APP_PATH"
           TAG="${{ github.ref_name }}"
-          cd dest/desktop
+          # NOTE: stay at repo root — APP_PATH is relative to it (no cd).
           # 1) Keep a ditto zip (preserves symlinks/resource forks, unlike zip)
-          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "piskel-$TAG-osx-x64.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "dest/desktop/piskel-$TAG-osx-x64.zip"
           # 2) Build a drag-to-Applications DMG via a staging dir
           STAGE="$(mktemp -d)/dmg"
           mkdir -p "$STAGE"
           cp -R "$APP_PATH" "$STAGE/"
           ln -s /Applications "$STAGE/Applications"
-          hdiutil create -volname "Piskel" -srcfolder "$STAGE" -ov -format UDZO "piskel-$TAG-osx-x64.dmg"
-          ls -la *.zip *.dmg
+          hdiutil create -volname "Piskel" -srcfolder "$STAGE" -ov -format UDZO "dest/desktop/piskel-$TAG-osx-x64.dmg"
+          ls -la dest/desktop/*.zip dest/desktop/*.dmg
 
       - name: Upload artifacts
         if: steps.gate.outputs.run == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: piskel-desktop-${{ matrix.platform }}
-          path: dest/desktop/*.{zip,dmg}
+          # NOTE: one glob per line — brace expansion (e.g. *.{zip,dmg})
+          # is NOT reliably supported by upload-artifact, and the
+          # windows-linux job only produces .zip (no .dmg).
+          path: |
+            dest/desktop/*.zip
+            dest/desktop/*.dmg
           if-no-files-found: error
           retention-days: 14
 
@@ -155,7 +167,7 @@ jobs:
       - name: List artifacts + checksums
         run: |
           ls -la dist/
-          (cd dist && shasum -a 256 *.zip *.dmg > SHA256SUMS.txt && cat SHA256SUMS.txt)
+          (cd dist && shopt -s nullglob && files=(*.zip *.dmg) && shasum -a 256 "${files[@]}" > SHA256SUMS.txt && cat SHA256SUMS.txt)
 
       - name: Create release
         uses: softprops/action-gh-release@v2
