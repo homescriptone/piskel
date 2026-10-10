@@ -1,0 +1,169 @@
+name: Desktop Builds
+
+# Builds NW.js desktop apps for Windows, Linux and macOS.
+# - Manual run: Actions > Desktop Builds > Run workflow
+# - Automatic: push a tag like v0.15.3 (creates a GitHub Release with binaries)
+# - macOS must build on macos-latest (required for .app bundle symlinks/icons).
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Platform to build'
+        required: false
+        type: choice
+        options:
+          - all
+          - windows-linux
+          - macos
+        default: 'all'
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - master
+    paths:
+      - 'scripts/desktop.js'
+      - 'package.json'
+      - '.github/workflows/desktop.yml'
+
+permissions:
+  contents: write # needed to create GitHub Releases on tags
+
+jobs:
+  build:
+    name: Build (${{ matrix.display }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: windows-linux
+            display: 'Windows + Linux'
+          - os: macos-latest
+            platform: macos
+            display: 'macOS'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Filter platform on manual dispatch
+        id: gate
+        shell: bash
+        run: |
+          INPUT="${{ github.event.inputs.platform }}"
+          if [ -z "$INPUT" ] || [ "$INPUT" = "all" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif [ "$INPUT" = "${{ matrix.platform }}" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install dependencies
+        if: steps.gate.outputs.run == 'true'
+        run: npm ci
+
+      # Cache NW.js binaries (scripts/desktop.js stores them in ./cache).
+      # Key includes NW version so a bump in desktop.js naturally busts the cache.
+      - name: Cache NW.js binaries
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/cache@v4
+        with:
+          path: cache
+          key: nwjs-0.110.1-${{ matrix.platform }}-${{ runner.os }}-v1
+          restore-keys: |
+            nwjs-0.110.1-${{ matrix.platform }}-
+
+      - name: Build web assets
+        if: steps.gate.outputs.run == 'true'
+        run: npm run build
+
+      - name: Build desktop app (Windows + Linux)
+        if: steps.gate.outputs.run == 'true' && matrix.platform == 'windows-linux'
+        run: npm run build:desktop
+
+      - name: Build desktop app (macOS)
+        if: steps.gate.outputs.run == 'true' && matrix.platform == 'macos'
+        run: npm run build:mac
+
+      - name: Package artifacts (Windows + Linux)
+        if: steps.gate.outputs.run == 'true' && matrix.platform == 'windows-linux'
+        shell: bash
+        run: |
+          ls -R dest/desktop
+          cd dest/desktop
+          for d in win-ia32 win-x64 linux-ia32 linux-x64; do
+            if [ -d "$d" ]; then
+              (cd "$d" && zip -qr "../piskel-${{ github.ref_name }}-$d.zip" .)
+            fi
+          done
+          cd ../..
+          ls -la dest/desktop/*.zip
+
+      - name: Package artifact (macOS)
+        if: steps.gate.outputs.run == 'true' && matrix.platform == 'macos'
+        shell: bash
+        run: |
+          ls -R dest/desktop
+          # Locate the .app bundle regardless of nw-builder nesting
+          APP_PATH=$(find dest/desktop -maxdepth 4 -name "Piskel.app" -print -quit)
+          if [ -z "$APP_PATH" ]; then
+            echo "Piskel.app not found under dest/desktop:"
+            find dest/desktop -maxdepth 4 -print
+            exit 1
+          fi
+          echo "Found app: $APP_PATH"
+          TAG="${{ github.ref_name }}"
+          cd dest/desktop
+          # 1) Keep a ditto zip (preserves symlinks/resource forks, unlike zip)
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "piskel-$TAG-osx-x64.zip"
+          # 2) Build a drag-to-Applications DMG via a staging dir
+          STAGE="$(mktemp -d)/dmg"
+          mkdir -p "$STAGE"
+          cp -R "$APP_PATH" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create -volname "Piskel" -srcfolder "$STAGE" -ov -format UDZO "piskel-$TAG-osx-x64.dmg"
+          ls -la *.zip *.dmg
+
+      - name: Upload artifacts
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: piskel-desktop-${{ matrix.platform }}
+          path: dest/desktop/*.{zip,dmg}
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts + checksums
+        run: |
+          ls -la dist/
+          (cd dist && shasum -a 256 *.zip *.dmg > SHA256SUMS.txt && cat SHA256SUMS.txt)
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/*.dmg
+            dist/SHA256SUMS.txt
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
